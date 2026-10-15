@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>千里 · 青绿流光</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000000; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+
+        /* UI 面板 */
+        #ui-layer {
+            position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 10;
+        }
+        .panel {
+            background: rgba(0, 0, 0, 0.85); backdrop-filter: blur(8px);
+            padding: 20px; border-radius: 4px; border: 1px solid rgba(0, 255, 255, 0.2);
+            color: #eee; width: 260px; pointer-events: auto;
+        }
+        h1 {
+            margin: 0 0 15px 0; font-size: 14px; letter-spacing: 2px;
+            text-transform: uppercase; color: #00ffff; text-align: center;
+            border-bottom: 1px solid rgba(0, 255, 255, 0.2); padding-bottom: 10px;
+        }
+        .status-text { font-size: 12px; color: #888; display: block; text-align: center; margin-bottom: 10px; }
+        button {
+            width: 100%; padding: 10px; background: transparent;
+            border: 1px solid #00ffff; color: #00ffff;
+            cursor: pointer; font-size: 12px; transition: 0.3s;
+            text-transform: uppercase; letter-spacing: 1px;
+        }
+        button:hover { background: rgba(0, 255, 255, 0.2); box-shadow: 0 0 15px rgba(0,255,255,0.4); }
+
+        /* 摄像头小窗 */
+        #cam-container {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 160px; height: 120px; z-index: 5;
+            border: 1px solid #333; background: #000;
+            transform: scaleX(-1); opacity: 0.8;
+        }
+        #cam-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.4; }
+        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 6; }
+    </style>
+
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="panel">
+            <h1>千里 · 青绿流光</h1>
+            <span class="status-text" id="status-text">初始化渲染引擎...</span>
+            <button id="fs-btn">进入全屏沉浸</button>
+            <label style="display:block;font-size:11px;color:#b7d6df;margin-top:14px;">日照时刻 · 拖动查看山体受光面
+                <input id="sun-phase" aria-label="日照时刻" type="range" min="0" max="100" value="44" style="width:100%;accent-color:#b6e96a;">
+            </label>
+            <label style="font-size:11px;color:#b7d6df;"><input id="sun-auto" type="checkbox" checked> 自动晨昏循环（约 140 秒）</label>
+            <div style="font-size:10px; color:#555; margin-top:10px; text-align:center;">
+                张合手掌 · 山势起伏 / 水脉流动<br>H 隐藏面板 · C 隐藏镜头 · F 全屏
+            </div>
+        </div>
+    </div>
+
+    <div id="cam-container">
+        <video id="cam-video" playsinline muted autoplay></video>
+        <canvas id="output-canvas"></canvas>
+    </div>
+
+    <script>
+        // ================= 配置参数 =================
+        const CONFIG = {
+            particleCount: 192000, // 粒子总量，根据图片密度要求大幅提升
+            rangeX: 120,           // 场景宽度
+            rangeZ: 140,           // 场景深度
+            lineCount: 300,        // Z轴方向的线条数量（模拟层积岩纹理）
+            colorRiver: new THREE.Color('#fde803'), // 金色河流
+            colorMtBase: new THREE.Color('#002044'), // 山脚深蓝
+            colorMtTop: new THREE.Color('#00fff7')   // 山顶青色
+        };
+
+        // ================= 1. Three.js 场景 =================
+        const scene = new THREE.Scene();
+        scene.background = null;
+        scene.fog = new THREE.FogExp2(0x050510, 0.006); // 黑色雾气隐藏远处边界
+
+        const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
+        camera.position.set(0, 29, 102); // 较高的俯视角度
+        camera.lookAt(0, 9, -25);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // 限制像素比以保证流畅度
+        document.body.appendChild(renderer.domElement);
+
+        // ================= 2. 几何体生成 (按行扫描) =================
+        const geometry = new THREE.BufferGeometry();
+        const positions = [];
+        const randoms = []; // 用于噪声偏移
+        const lineIndices = []; // 记录是第几行，用于产生纹理感
+
+        // 我们使用“行”的概念来生成，让粒子看起来像是一条条等高线
+        const pointsPerLine = Math.floor(CONFIG.particleCount / CONFIG.lineCount);
+
+        for (let i = 0; i < CONFIG.lineCount; i++) {
+            // Z轴坐标（深度）
+            const z = (i / CONFIG.lineCount - 0.5) * CONFIG.rangeZ;
+
+            for (let j = 0; j < pointsPerLine; j++) {
+                // X轴坐标（横向），均匀分布，但后续Shader会根据它来决定是否丢弃
+                const x = (j / pointsPerLine - 0.5) * CONFIG.rangeX;
+
+                positions.push(x, 0, z); // Y由Shader决定
+
+                // 传入随机值
+                randoms.push(Math.random(), Math.random(), Math.random());
+                lineIndices.push(i / CONFIG.lineCount);
+            }
+        }
+
+        // 添加一些额外的“悬浮光尘”在空中
+        const dustCount = 1800;
+        for(let i=0; i<dustCount; i++) {
+            positions.push(
+                (Math.random()-0.5)*CONFIG.rangeX,
+                Math.random()*30 + 10,
+                (Math.random()-0.5)*CONFIG.rangeZ
+            );
+            randoms.push(Math.random(), Math.random(), Math.random());
+            lineIndices.push(-1.0); // -1 代表悬浮尘埃
+        }
+
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 3));
+        geometry.setAttribute('aLine', new THREE.Float32BufferAttribute(lineIndices, 1));
+
+        // ================= 3. Shader (核心造型逻辑) =================
+        const vertexShader = `
+            uniform float uTime;
+            uniform float uScale; // 手势控制：山脉高度和河流湍急度
+
+            attribute vec3 aRandom;
+            attribute float aLine;
+
+            varying float vType; // 0=河流, 1=山脉, 2=黑色虚空, 3=悬浮尘埃
+            varying float vHeight;
+            varying float vIntensity;
+
+            // 柏林噪声函数
+            vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+            float snoise(vec2 v) {
+                const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+                vec2 i  = floor(v + dot(v, C.yy) );
+                vec2 x0 = v - i + dot(i, C.xx);
+                vec2 i1; i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+                vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+                i = mod289(i);
+                vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 ));
+                vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+                m = m*m ; m = m*m ;
+                vec3 x = 2.0 * fract(p * C.www) - 1.0;
+                vec3 h = abs(x) - 0.5;
+                vec3 ox = floor(x + 0.5);
+                vec3 a0 = x - ox;
+                m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+                vec3 g;
+                g.x  = a0.x  * x0.x  + h.x  * x0.y;
+                g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+                return 130.0 * dot(m, g);
+            }
+
+
+            varying vec3 vNormal;
+            varying vec3 vWorld;
+            varying float vGold;
+            varying float vDepth;
+            float terrain(vec2 p) {
+                float curve = sin(p.y * .048) * 10.0 + sin(p.y * .105) * 3.0;
+                float bank = abs(p.x - curve);
+                float mass = smoothstep(10.5, 24.0, bank);
+                float ridge = .5 + .5 * snoise(p * vec2(.043, .029));
+                float detail = snoise(p * .09) * 1.1 + snoise(p * .19) * .22;
+                float silhouette = 8.0 + pow(ridge, 1.8) * 30.0 + detail;
+                float edge = 1.0 - smoothstep(48.0, 60.0, abs(p.x));
+                return max(0.0, silhouette * mass * edge) * (.6 + uScale * 1.5);
+            }
+            void main() {
+                vec3 pos = position;
+                vNormal = vec3(0.0,1.0,0.0);
+                vGold = 0.0;
+                vHeight = 0.0;
+                vIntensity = 1.0;
+                float pointSize = 1.2;
+                if (aLine < -.5) {
+                    vType = 3.0;
+                    pos.x += sin(uTime * .09 + aRandom.x * 20.0) * 2.0;
+                    pos.y += sin(uTime * .13 + aRandom.z * 20.0);
+                    vGold = step(.87, aRandom.y);
+                    vIntensity = .22 + .18 * sin(uTime * .5 + aRandom.x * 30.0);
+                    pointSize = 1.5;
+                } else {
+                    float curve = sin(pos.z * .048) * 10.0 + sin(pos.z * .105) * 3.0;
+                    float bank = abs(pos.x - curve);
+                    if (bank < 11.8) {
+                        vType = 0.0;
+                        // Streamlines turn around local eddies instead of flashing in place.
+                        float along = pos.z;
+                        float cross = (pos.x - curve) / 11.8;
+                        float eddy = sin(along * .17 + cross * 3.8 - uTime * .22);
+                        pos.x += sin(along * .15 + cross * 5.0 - uTime * .16) * .72;
+                        pos.z += sin(cross * 5.5 + along * .08 + uTime * .12) * .6;
+                        pos.y = -.3 + sin(along * .12 + cross * 4.0 - uTime * .4) * (.18 + uScale * .3);
+                        vGold = pow(.5 + .5 * sin(cross * 4.5 + eddy * 1.6 + along * .07 - uTime * .18), 9.0);
+                        vIntensity = .85 + .35 * (1.0 - abs(cross));
+                        pointSize = 1.4;
+                    } else {
+                        vType = 1.0;
+                        pos.y = terrain(pos.xz);
+                        float slope = terrain(pos.xz + vec2(.35, 0.0)) - pos.y;
+                        float crest = smoothstep(.15, .7, abs(slope));
+                        float pulse = pow(.5 + .5 * sin(pos.z * .11 + pos.x * .13 - uTime * .16), 12.0);
+                        vGold = pulse * (1.0 - smoothstep(8.0, 20.0, pos.y)) * .9;
+                        vIntensity = .32 + crest * .5 + .25 * smoothstep(7.0, 24.0, pos.y);
+                        vIntensity *= .85 + .15 * sin(aLine * 650.0);
+                        pointSize = 1.05 + crest * .6;
+                    }
+                    vHeight = pos.y;
+                }
+
+                if (vType > .5 && vType < 2.0) {
+                    float dx = (terrain(position.xz + vec2(.25,0.0)) - terrain(position.xz - vec2(.25,0.0))) / .5;
+                    float dz = (terrain(position.xz + vec2(0.0,.25)) - terrain(position.xz - vec2(0.0,.25))) / .5;
+                    vNormal = normalize(vec3(-dx,1.0,-dz));
+                }
+                #ifdef SURFACE_PASS
+                    pos.y -= .10;
+                #endif
+                vWorld = pos;
+                vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                vDepth = -mvPosition.z;
+                gl_Position = projectionMatrix * mvPosition;
+                gl_PointSize = clamp(pointSize * (62.0 / max(1.0, -mvPosition.z)), .65, 3.5);
+            }
+        `;
+
+        const atmosphereGLSL = `
+            uniform float uTime;
+            uniform float uSunPhase;
+            vec3 sunDirection() {
+                float phase = uSunPhase;
+                return normalize(vec3(sin(phase), .18 + .72 * cos(phase), -.48));
+            }
+            float daylight() { return smoothstep(-.15,.65,sunDirection().y); }
+            vec3 horizonColor() { return mix(vec3(.42,.18,.39),vec3(.64,.75,.77),daylight()); }
+        `;
+        const fragmentShader = atmosphereGLSL + `
+            varying vec3 vNormal;
+            varying vec3 vWorld;
+            varying float vType;
+            varying float vHeight;
+            varying float vIntensity;
+            varying float vGold;
+            varying float vDepth;
+            void main() {
+                float alpha = 1.0;
+
+                #if !defined(CONTOUR_PASS) && !defined(SURFACE_PASS)
+                    float d = length(gl_PointCoord - .5);
+                    if (d > .5) discard;
+                    alpha = 1.0 - smoothstep(.12,.5,d);
+                #endif
+                vec3 lightDir = sunDirection();
+                float diffuse = max(dot(normalize(vNormal), lightDir),0.0);
+                float day = daylight();
+                vec3 warm = mix(vec3(1.0,.27,.36),vec3(1.0,.82,.30),day);
+                vec3 color;
+                if (vType < .5) {
+                    color = mix(vec3(.25,.06,.45), vec3(.03,.53,.61), .5+.3*sin(vWorld.z*.09));
+                    color = mix(color,vec3(.77,.95,.24),vGold*.85);
+                    float reflection = pow(max(0.0,cos(vWorld.x*.22-lightDir.x*2.0+sin(vWorld.z*.12)*.7)),18.0);
+                    color += warm * reflection * (.15+.3*day);
+                } else if (vType > 2.5) {
+                    color = mix(vec3(.2,.9,.85),warm,vGold);
+                    alpha *= .25;
+                } else {
+                    vec3 shadow = mix(vec3(.14,.055,.26),vec3(.018,.10,.20),day);
+                    vec3 jade = mix(vec3(.04,.37,.44),vec3(.015,.61,.45),smoothstep(1.0,27.0,vHeight));
+                    color = mix(shadow,jade,.2+diffuse*.8);
+                    color += warm * pow(diffuse,4.0) * (.12+.16*day);
+                    color = mix(color,vec3(.77,.87,.15),vGold*.35*diffuse);
+                    #ifndef SURFACE_PASS
+                        color = mix(vec3(.12,.55,.72),vec3(.30,1.0,.81),diffuse);
+                        color = mix(color,vec3(.95,.91,.25),vGold*.65);
+                    #endif
+                }
+                float haze = 1.0-exp(-max(0.0,vDepth-30.0)*.008);
+                #ifdef SURFACE_PASS
+                    color = mix(color,horizonColor(),haze*.65);
+                #else
+                    color *= vIntensity;
+                    alpha *= (1.0-haze)*.65;
+                    #ifdef CONTOUR_PASS
+                        alpha *= .65;
+                    #endif
+                #endif
+                gl_FragColor = vec4(color,alpha);
+            }
+        `;
+
+        const uniforms = {
+            uTime: { value: 0 },
+            uSunPhase: { value: -.38 },
+            uScale: { value: 0.0 }, // 初始平缓
+            uColorRiver: { value: CONFIG.colorRiver },
+            uColorMtBase: { value: CONFIG.colorMtBase },
+            uColorMtTop: { value: CONFIG.colorMtTop }
+        };
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader, fragmentShader, uniforms,
+            transparent: true,
+            depthWrite: false, // 粒子不需要写入深度，防止遮挡问题
+            blending: THREE.AdditiveBlending // 叠加模式，越密越亮
+        });
+
+        const particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
+        const contourIndices = [];
+        for (let row = 0; row < CONFIG.lineCount; row++) {
+            for (let col = 0; col < pointsPerLine - 1; col++) {
+                const index = row * pointsPerLine + col;
+                contourIndices.push(index, index + 1);
+            }
+        }
+        const contourGeometry = new THREE.BufferGeometry();
+        for (const key of ['position', 'aRandom', 'aLine']) {
+            contourGeometry.setAttribute(key, geometry.getAttribute(key));
+        }
+        contourGeometry.setIndex(contourIndices);
+        const contourMaterial = new THREE.ShaderMaterial({
+            vertexShader, fragmentShader, uniforms,
+            defines: { CONTOUR_PASS: 1 },
+            transparent: true, depthWrite: false,
+            blending: THREE.AdditiveBlending
+        });
+        scene.add(new THREE.LineSegments(contourGeometry, contourMaterial));
+
+        // Opaque terrain writes depth: hidden slopes no longer show through the mountain.
+        const surfaceGeometry = new THREE.BufferGeometry();
+        for (const key of ['position','aRandom','aLine']) surfaceGeometry.setAttribute(key, geometry.getAttribute(key));
+        const faces = [];
+        for(let r=0;r<CONFIG.lineCount-1;r++) for(let c=0;c<pointsPerLine-1;c++) {
+            const i=r*pointsPerLine+c, j=i+pointsPerLine;
+            faces.push(i,j,i+1,i+1,j,j+1);
+        }
+        surfaceGeometry.setIndex(faces);
+        const surfaceMaterial = new THREE.ShaderMaterial({vertexShader,fragmentShader,uniforms,
+            defines:{SURFACE_PASS:1}, side:THREE.DoubleSide, depthWrite:true});
+        scene.add(new THREE.Mesh(surfaceGeometry,surfaceMaterial));
+
+        // Full-screen procedural atmosphere, painted behind the world without a texture.
+        const skyMaterial = new THREE.ShaderMaterial({
+            uniforms,depthTest:false,depthWrite:false,
+            vertexShader:`varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,1.0,1.0); }`,
+            fragmentShader:atmosphereGLSL + `
+                varying vec2 vUv;
+                void main(){
+                    float day=daylight();
+                    vec3 zenith=mix(vec3(.10,.075,.30),vec3(.12,.38,.63),day);
+                    vec3 col=mix(horizonColor(),zenith,smoothstep(.18,1.0,vUv.y));
+                    vec3 sun=sunDirection();
+                    vec2 center=vec2(.5+sun.x*.35,.32+sun.y*.32);
+                    vec2 delta=vUv-center; delta.x *= 1.6;
+                    float radius=length(delta);
+                    vec3 warmth=mix(vec3(1.0,.28,.25),vec3(1.0,.78,.40),day);
+                    col=mix(col,warmth,exp(-radius*radius*20.0)*.36);
+                    col+=warmth*(1.0-smoothstep(.023,.028,radius))*.6;
+                    float cloud=sin(vUv.x*16.0+uTime*.012+sin(vUv.y*27.0)*1.8);
+                    col+=vec3(.16,.10,.13)*pow(max(0.0,cloud),6.0)*exp(-pow((vUv.y-.57)*9.0,2.0))*.35;
+                    gl_FragColor=vec4(col,1.0);
+                }`
+        });
+        const sky = new THREE.Mesh(new THREE.PlaneGeometry(2,2),skyMaterial);
+        sky.frustumCulled=false; sky.renderOrder=-1000; scene.add(sky);
+
+        // Three distant ridges have distinct scale, colour and atmospheric contrast.
+        for(let layer=0;layer<3;layer++){
+            const vertices=[],indices=[];
+            for(let i=0;i<=240;i++){
+                const x=(i/240-.5)*430;
+                const h=12+layer*3+Math.sin(x*.032+layer*2.2)*7+Math.sin(x*.077+layer)*3+Math.cos(x*.13)*1.3;
+                vertices.push(x,-8,-105-layer*45,x,h,-105-layer*45);
+                if(i<240){const q=i*2;indices.push(q,q+1,q+2,q+1,q+3,q+2);}
+            }
+            const g=new THREE.BufferGeometry();g.setAttribute('position',new THREE.Float32BufferAttribute(vertices,3));g.setIndex(indices);
+            const m=new THREE.ShaderMaterial({uniforms:{uTime:uniforms.uTime,uSunPhase:uniforms.uSunPhase,uLayer:{value:layer}},side:THREE.DoubleSide,
+                vertexShader:`varying float h;void main(){h=position.y;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
+                fragmentShader:atmosphereGLSL+`uniform float uLayer;varying float h;void main(){
+                    vec3 ink=mix(vec3(.16,.19,.36),vec3(.20,.43,.51),daylight());
+                    vec3 c=mix(ink,horizonColor(),.30+uLayer*.19);
+                    c=mix(c,horizonColor(),(1.0-smoothstep(-4.0,16.0,h))*.5);
+                    gl_FragColor=vec4(c,1.0);}`});
+            scene.add(new THREE.Mesh(g,m));
+        }
+        document.getElementById('sun-phase').addEventListener('input', () => { document.getElementById('sun-auto').checked = false; });
+        // Projection controls do not alter the original gesture mapping.
+        window.addEventListener('keydown', event => {
+            if (event.repeat) return;
+            const key = event.key.toLowerCase();
+            const toggle = id => {
+                const el = document.getElementById(id);
+                el.hidden = !el.hidden;
+            };
+            if (key === 'h') toggle('ui-layer');
+            if (key === 'c') toggle('cam-container');
+            if (key === 'f') document.getElementById('fs-btn').click();
+        });
+
+
+        // ================= 4. 动画循环 =================
+        const clock = new THREE.Clock();
+        let targetScale = 0.2;
+        let currentScale = 0.2;
+        let isHandActive = false;
+        let handLostFrames = 0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+
+            // 手势平滑处理
+            if (!isHandActive) {
+                handLostFrames++;
+                if (handLostFrames > 20) {
+                    targetScale = 0.2 + Math.sin(t * 0.5) * 0.1; // 待机呼吸
+                }
+            } else {
+                handLostFrames = 0;
+            }
+
+            // 缓动
+            currentScale += (targetScale - currentScale) * 0.05;
+
+            uniforms.uTime.value = t;
+            if (document.getElementById('sun-auto').checked) {
+                uniforms.uSunPhase.value = t * .045 - .38;
+                document.getElementById('sun-phase').value = ((uniforms.uSunPhase.value + Math.PI) % (Math.PI * 2)) / (Math.PI * 2) * 100;
+            } else {
+                uniforms.uSunPhase.value = Number(document.getElementById('sun-phase').value) / 100 * Math.PI * 2 - Math.PI;
+            }
+            uniforms.uScale.value = currentScale;
+
+            // 缓慢向前推进的效果 (移动相机)
+            // 实际上我们可以移动 geometry 或者 offset，这里简单移动相机 z
+            // 为了无限循环，通常是在 shader 里做 offset，这里简化处理：仅轻微摆动
+            scene.rotation.y = Math.sin(t * 0.05) * 0.02;
+
+            camera.position.y = 29 + currentScale * 6;
+            camera.lookAt(0, 9 + currentScale * 5, -25);
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // ================= 5. UI 事件 =================
+        document.getElementById('fs-btn').addEventListener('click', () => {
+             if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+             else document.exitFullscreen();
+        });
+
+        // ================= 6. MediaPipe 集成 =================
+        const videoElement = document.getElementById('cam-video');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusText = document.getElementById('status-text');
+        let modelReady = false;
+        let frameProcessing = false;
+
+        function resizeCanvas() {
+            canvasElement.width = videoElement.videoWidth || 160;
+            canvasElement.height = videoElement.videoHeight || 120;
+        }
+
+        function onResults(results) {
+            modelReady = true;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandActive = true;
+                statusText.innerText = "手势控制中 (张开幅度控制山高)";
+
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: 'rgba(1,75,61,0.97)', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#0059ff', lineWidth: 1});
+
+                    // 计算手掌张开程度
+                    const wrist = landmarks[0];
+                    const middleTip = landmarks[12];
+                    const distance = Math.sqrt(Math.pow(wrist.x - middleTip.x, 2) + Math.pow(wrist.y - middleTip.y, 2));
+
+                    // 映射到 0.0 ~ 1.0
+                    let val = (distance - 0.15) * 3.0;
+                    targetScale = Math.max(0.0, Math.min(1.2, val));
+                }
+            } else {
+                isHandActive = false;
+                statusText.innerText = modelReady ? "请将手放入镜头区域" : "正在加载手势模型...";
+            }
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0, // 降低模型复杂度以提升性能，因为粒子系统很重
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                if (frameProcessing) return;
+                if(canvasElement.width !== videoElement.videoWidth) resizeCanvas();
+                frameProcessing = true;
+                try {
+                    await hands.send({image: videoElement});
+                } catch (error) {
+                    console.error('MediaPipe 手势帧处理失败:', error);
+                    statusText.innerText = "手势模型处理失败，请刷新页面重试";
+                } finally {
+                    frameProcessing = false;
+                }
+            },
+            width: 320,
+            height: 240
+        });
+
+        cameraUtils.start()
+            .then(() => {
+                if (!modelReady) statusText.innerText = "正在加载手势模型...";
+            })
+            .catch(error => {
+                console.error('摄像头启动失败:', error);
+                statusText.innerText = "摄像头未授权或不可用";
+            });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
