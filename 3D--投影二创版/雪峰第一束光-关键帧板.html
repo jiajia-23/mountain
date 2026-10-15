@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>雪峰第一束光 / 静态关键帧板</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #080f16; color: #d9e1df; font-family: "Segoe UI", sans-serif; }
+    body { display: grid; grid-template-columns: minmax(0, 1fr) 300px; }
+    #stage { min-height: 100vh; position: relative; overflow: hidden; background: #08121a; }
+    canvas { display: block; width: 100%; height: 100vh; }
+    #caption { position: absolute; left: 34px; bottom: 28px; text-shadow: 0 2px 8px #000; }
+    #caption strong { display: block; color: #f0d28f; font-size: 20px; font-weight: 400; letter-spacing: 4px; }
+    #caption span { display: block; margin-top: 8px; color: rgba(222,232,228,.62); font-size: 11px; letter-spacing: 1px; }
+    aside { min-height: 100vh; padding: 26px 22px; border-left: 1px solid rgba(212,222,214,.15); background: #0b141b; }
+    h1 { margin: 0; color: #f0d28f; font-size: 17px; font-weight: 400; letter-spacing: 3px; }
+    h2 { margin: 7px 0 22px; color: rgba(222,232,228,.48); font-size: 10px; letter-spacing: 2px; font-weight: 400; }
+    .states { display: grid; gap: 7px; margin-bottom: 22px; }
+    button { padding: 11px 10px; border: 1px solid rgba(222,232,228,.22); background: transparent; color: #c9d4d0; text-align: left; cursor: pointer; font-size: 11px; }
+    button.active, button:hover { border-color: #e5c77e; color: #f0d28f; background: rgba(229,199,126,.08); }
+    #description { min-height: 84px; color: rgba(222,232,228,.68); font-size: 11px; line-height: 1.7; }
+    .layers { margin-top: 20px; padding-top: 15px; border-top: 1px solid rgba(222,232,228,.14); }
+    .layers h3 { margin: 0 0 12px; color: #d9e1c2; font-size: 11px; font-weight: 400; letter-spacing: 1px; }
+    .layers div { margin: 9px 0; color: rgba(222,232,228,.56); font-size: 10px; line-height: 1.5; }
+    .layers b { color: #d7c385; font-weight: 400; }
+  </style>
+</head>
+<body>
+  <main id="stage">
+    <canvas id="mountains"></canvas>
+    <div id="caption"><strong id="title">未被照亮</strong><span id="subtitle">山已经在那里，只是还没有被看见。</span></div>
+  </main>
+  <aside>
+    <h1>雪峰第一束光</h1>
+    <h2>STATIC KEYFRAME STUDY / SAME COMPOSITION</h2>
+    <div class="states">
+      <button class="active" data-state="dark">01 · 未被照亮</button>
+      <button data-state="first">02 · 第一束光</button>
+      <button data-state="full">03 · 完整高潮</button>
+    </div>
+    <div id="description">冷灰色峰群和深暗山谷。只保留主峰、支脉、陡壁与谷地的体积关系，不让画面依赖装饰元素。</div>
+    <section class="layers">
+      <h3>程序实现标注</h3>
+      <div><b>主峰与支脉</b><br>预制不对称轮廓 + 多个山面遮罩；Canvas / SVG 均可实现。</div>
+      <div><b>迎光面 / 背光面</b><br>独立 highlight mask，按光照进度推进受光边界，不移动圆形太阳。</div>
+      <div><b>谷底暗部</b><br>固定深色通道与局部遮挡，投影时保留空间纵深。</div>
+      <div><b>局部云海</b><br>软边 alpha 遮罩，只遮住山坳和谷口，不横穿全屏。</div>
+      <div><b>实体前景衔接</b><br>底部保留冷暗不规则区域，让真实山石自然成为近景。</div>
+    </section>
+  </aside>
+  <script>
+    const canvas = document.querySelector("#mountains"), ctx = canvas.getContext("2d");
+    const stage = document.querySelector("#stage"), title = document.querySelector("#title"), subtitle = document.querySelector("#subtitle"), description = document.querySelector("#description");
+    let state = "dark", width = 0, height = 0, dpr = 1;
+    const copy = {
+      dark: ["未被照亮", "山已经在那里，只是还没有被看见。", "冷灰色峰群与深暗山谷。主峰、陡壁、支脉和谷地依靠大面积明暗关系建立体积。"],
+      first: ["第一束光", "最高的山脊先醒来，谷底仍在暗处。", "斜向暖光只到达最高主峰的迎光面，背光面保持青灰；局部云边获得反光，太阳可以完全藏在山后。"],
+      full: ["完整高潮", "整片山体被光逐层揭示，但深谷没有被填满。", "主峰、支脉和远景雪峰建立完整层次，暖金沿迎光面扩散，谷底保留暗色通道，云层打开深谷尺度。"]
+    };
+    const buttons = [...document.querySelectorAll("[data-state]")];
+    buttons.forEach(button => button.addEventListener("click", () => { state = button.dataset.state; buttons.forEach(item => item.classList.toggle("active", item === button)); title.textContent = copy[state][0]; subtitle.textContent = copy[state][1]; description.textContent = copy[state][2]; draw(); }));
+    function resize() { dpr = Math.min(devicePixelRatio, 1.5); width = stage.clientWidth; height = stage.clientHeight; canvas.width = width * dpr; canvas.height = height * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw(); }
+    addEventListener("resize", resize);
+    function polygon(points, fill) { ctx.beginPath(); points.forEach((point, i) => i ? ctx.lineTo(point[0] * width, point[1] * height) : ctx.moveTo(point[0] * width, point[1] * height)); ctx.closePath(); ctx.fillStyle = fill; ctx.fill(); }
+    function line(points, stroke, lineWidth) { ctx.beginPath(); points.forEach((point, i) => i ? ctx.lineTo(point[0] * width, point[1] * height) : ctx.moveTo(point[0] * width, point[1] * height)); ctx.strokeStyle = stroke; ctx.lineWidth = lineWidth; ctx.stroke(); }
+    function fog(x, y, rx, ry, color, alpha) { const g = ctx.createRadialGradient(x * width, y * height, 0, x * width, y * height, rx * width); g.addColorStop(0, `rgba(${color},${alpha})`); g.addColorStop(1, `rgba(${color},0)`); ctx.fillStyle = g; ctx.fillRect((x - rx) * width, (y - ry) * height, rx * width * 2, ry * height * 2); }
+    function draw() {
+      if (!width) return;
+      const light = state === "dark" ? 0 : state === "first" ? .48 : 1;
+      const sky = ctx.createLinearGradient(0, 0, 0, height); sky.addColorStop(0, state === "dark" ? "#101a23" : "#17232a"); sky.addColorStop(.7, state === "full" ? "#314044" : "#18292f"); sky.addColorStop(1, "#080f15"); ctx.fillStyle = sky; ctx.fillRect(0, 0, width, height);
+      if (state !== "full") fog(.82, .31, .5, .3, "91,126,132", state === "first" ? .08 : .035);
+      polygon([[0, .82], [.14, .72], [.26, .75], [.39, .64], [.54, .71], [.68, .61], [.82, .72], [1, .64], [1, 1], [0, 1]], "#0a151d");
+      polygon([[0, .71], [.13, .6], [.26, .64], [.41, .44], [.52, .57], [.63, .38], [.74, .55], [.88, .46], [1, .59], [1, 1], [0, 1]], state === "full" ? "#20363a" : "#14272e");
+      polygon([[.14, .6], [.27, .64], [.41, .44], [.52, .57], [.63, .38], [.74, .55], [.88, .46], [1, .59], [.84, .67], [.69, .61], [.56, .75], [.39, .64], [.25, .76]], state === "full" ? "#314b4a" : "#1c353b");
+      polygon([[.41, .44], [.47, .19], [.53, .37], [.63, .38], [.56, .75], [.39, .64]], state === "dark" ? "#22343a" : state === "first" ? "#4e5e5a" : "#6f7b6d");
+      polygon([[.47, .19], [.53, .37], [.56, .75], [.49, .52]], state === "dark" ? "#111e27" : "#1c2f35");
+      polygon([[.47, .19], [.49, .3], [.45, .36], [.42, .44]], state === "dark" ? "#2b3c40" : state === "first" ? "#c7aa72" : "#e5c47f");
+      polygon([[.42, .44], [.45, .36], [.49, .3], [.52, .4], [.56, .75], [.39, .64]], state === "full" ? "#927e5d" : state === "first" ? "#4f5d58" : "#273b3d");
+      polygon([[.26, .64], [.41, .44], [.39, .64], [.25, .76]], state === "full" ? "#526259" : "#263a3e");
+      polygon([[.63, .38], [.74, .55], [.69, .61], [.56, .75]], state === "full" ? "#4f625e" : "#1d3439");
+      polygon([[.74, .55], [.88, .46], [1, .59], [.84, .67]], state === "full" ? "#354d4d" : "#1a3036");
+      if (light > 0) {
+        polygon([[.49, .3], [.55, .32], [.68, .42], [.8, .53], [.72, .57], [.56, .48], [.45, .36]], `rgba(218,178,103,${.12 + light * .22})`);
+        polygon([[.26, .64], [.41, .44], [.39, .64], [.3, .7]], `rgba(192,164,105,${light * .25})`);
+        polygon([[.63, .38], [.74, .55], [.69, .61], [.59, .57]], `rgba(202,174,111,${light * .2})`);
+        line([[.45, .36], [.49, .3], [.55, .32], [.68, .42]], `rgba(248,211,132,${.45 + light * .35})`, 2);
+      }
+      if (state !== "dark") {
+        fog(.35, .67, .28, .12, "188,190,163", state === "first" ? .12 : .17);
+        fog(.78, .57, .18, .1, "190,196,173", state === "first" ? .05 : .12);
+      }
+      polygon([[0, .83], [.18, .76], [.34, .79], [.5, .71], [.69, .8], [.84, .73], [1, .78], [1, 1], [0, 1]], state === "full" ? "#0d1c20" : "#09151b");
+      if (state === "full") {
+        line([[.08, .79], [.28, .72], [.43, .75], [.58, .67], [.76, .74], [.94, .68]], "rgba(216,191,133,.22)", 2);
+        line([[.19, .83], [.36, .76], [.52, .8], [.72, .71]], "rgba(196,177,125,.13)", 1);
+      }
+    }
+    resize();
+  </script>
+</body>
+</html>

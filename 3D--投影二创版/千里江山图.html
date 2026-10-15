@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>云海日出 - 投影二创版</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #07121f; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+
+        /* UI 面板 */
+        #ui-layer {
+            position: absolute; top: 20px; left: 20px; pointer-events: none; z-index: 10;
+        }
+        .panel {
+            background: rgba(4, 13, 25, 0.82); backdrop-filter: blur(8px);
+            padding: 20px; border-radius: 4px; border: 1px solid rgba(0, 255, 255, 0.2);
+            color: #eee; width: 260px; pointer-events: auto;
+        }
+        h1 {
+            margin: 0 0 15px 0; font-size: 14px; letter-spacing: 2px;
+            text-transform: uppercase; color: #00ffff; text-align: center;
+            border-bottom: 1px solid rgba(0, 255, 255, 0.2); padding-bottom: 10px;
+        }
+        .status-text { font-size: 12px; color: #888; display: block; text-align: center; margin-bottom: 10px; }
+        button {
+            width: 100%; padding: 10px; background: transparent;
+            border: 1px solid #00ffff; color: #00ffff;
+            cursor: pointer; font-size: 12px; transition: 0.3s;
+            text-transform: uppercase; letter-spacing: 1px;
+        }
+        button:hover { background: rgba(0, 255, 255, 0.2); box-shadow: 0 0 15px rgba(0,255,255,0.4); }
+
+        /* 摄像头小窗 */
+        #cam-container {
+            position: absolute; bottom: 20px; right: 20px;
+            width: 160px; height: 120px; z-index: 5;
+            border: 1px solid #333; background: #000;
+            transform: scaleX(-1); opacity: 0.8;
+        }
+        #cam-video { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.4; }
+        #output-canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 6; }
+    </style>
+
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+
+    <div id="ui-layer">
+        <div class="panel">
+            <h1>云海日出 / MOSS HORIZON</h1>
+            <span class="status-text" id="status-text">初始化渲染引擎...</span>
+            <button id="fs-btn">进入全屏沉浸</button>
+            <div style="font-size:10px; color:#555; margin-top:10px; text-align:center;">
+                * 投影模式：低频光影 / 手势控制云海 *
+            </div>
+        </div>
+    </div>
+
+    <div id="cam-container">
+        <video id="cam-video" playsinline muted autoplay></video>
+        <canvas id="output-canvas"></canvas>
+    </div>
+
+    <script>
+        // ================= 配置参数 =================
+        const CONFIG = {
+            particleCount: 180000, // 投影优先：降低密度，保留远山轮廓
+            rangeX: 120,           // 场景宽度
+            rangeZ: 140,           // 场景深度
+            lineCount: 260,        // 更宽的笔触，投影中不形成噪点
+            colorRiver: new THREE.Color('#f2ad62'), // 日光落在云海上的暖色
+            colorMtBase: new THREE.Color('#102442'), // 远山靛青
+            colorMtTop: new THREE.Color('#7895a8')   // 雾中的山脊
+        };
+
+        // ================= 1. Three.js 场景 =================
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color('#07121f');
+        scene.fog = new THREE.FogExp2(0x07121f, 0.012); // 深蓝雾气压低远处对比
+
+        const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 500);
+        camera.position.set(0, 15, 40); // 较高的俯视角度
+        camera.lookAt(0, 0, -20);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5)); // 限制像素比以保证流畅度
+        document.body.appendChild(renderer.domElement);
+
+        // 低亮度太阳：使用色块而非高密度粒子，投影时轮廓更稳定。
+        const sunGlow = new THREE.Mesh(
+            new THREE.CircleGeometry(15, 48),
+            new THREE.MeshBasicMaterial({ color: 0xd97854, transparent: true, opacity: 0.045, depthWrite: false })
+        );
+        sunGlow.position.set(18, 19, -72);
+        scene.add(sunGlow);
+
+        const sun = new THREE.Mesh(
+            new THREE.CircleGeometry(6.5, 48),
+            new THREE.MeshBasicMaterial({ color: 0xffc47a, transparent: true, opacity: 0.72, depthWrite: false })
+        );
+        sun.position.set(18, 19, -70);
+        scene.add(sun);
+
+        // ================= 2. 几何体生成 (按行扫描) =================
+        const geometry = new THREE.BufferGeometry();
+        const positions = [];
+        const randoms = []; // 用于噪声偏移
+        const lineIndices = []; // 记录是第几行，用于产生纹理感
+
+        // 我们使用“行”的概念来生成，让粒子看起来像是一条条等高线
+        const pointsPerLine = Math.floor(CONFIG.particleCount / CONFIG.lineCount);
+
+        for (let i = 0; i < CONFIG.lineCount; i++) {
+            // Z轴坐标（深度）
+            const z = (i / CONFIG.lineCount - 0.5) * CONFIG.rangeZ;
+
+            for (let j = 0; j < pointsPerLine; j++) {
+                // X轴坐标（横向），均匀分布，但后续Shader会根据它来决定是否丢弃
+                const x = (j / pointsPerLine - 0.5) * CONFIG.rangeX;
+
+                positions.push(x, 0, z); // Y由Shader决定
+
+                // 传入随机值
+                randoms.push(Math.random(), Math.random(), Math.random());
+                lineIndices.push(i / CONFIG.lineCount);
+            }
+        }
+
+        // 添加一些额外的“悬浮光尘”在空中
+        const dustCount = 20000;
+        for(let i=0; i<dustCount; i++) {
+            positions.push(
+                (Math.random()-0.5)*CONFIG.rangeX,
+                Math.random()*30 + 10,
+                (Math.random()-0.5)*CONFIG.rangeZ
+            );
+            randoms.push(Math.random(), Math.random(), Math.random());
+            lineIndices.push(-1.0); // -1 代表悬浮尘埃
+        }
+
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geometry.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 3));
+        geometry.setAttribute('aLine', new THREE.Float32BufferAttribute(lineIndices, 1));
+
+        // ================= 3. Shader (核心造型逻辑) =================
+        const vertexShader = `
+            uniform float uTime;
+            uniform float uScale; // 手势控制：山脉高度和河流湍急度
+
+            attribute vec3 aRandom;
+            attribute float aLine;
+
+            varying float vType; // 0=河流, 1=山脉, 2=黑色虚空, 3=悬浮尘埃
+            varying float vHeight;
+            varying float vIntensity;
+
+            // 柏林噪声函数
+            vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec2 mod289(vec2 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
+            vec3 permute(vec3 x) { return mod289(((x*34.0)+1.0)*x); }
+            float snoise(vec2 v) {
+                const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+                vec2 i  = floor(v + dot(v, C.yy) );
+                vec2 x0 = v - i + dot(i, C.xx);
+                vec2 i1; i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+                vec4 x12 = x0.xyxy + C.xxzz; x12.xy -= i1;
+                i = mod289(i);
+                vec3 p = permute( permute( i.y + vec3(0.0, i1.y, 1.0 )) + i.x + vec3(0.0, i1.x, 1.0 ));
+                vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+                m = m*m ; m = m*m ;
+                vec3 x = 2.0 * fract(p * C.www) - 1.0;
+                vec3 h = abs(x) - 0.5;
+                vec3 ox = floor(x + 0.5);
+                vec3 a0 = x - ox;
+                m *= 1.79284291400159 - 0.85373472095314 * ( a0*a0 + h*h );
+                vec3 g;
+                g.x  = a0.x  * x0.x  + h.x  * x0.y;
+                g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+                return 130.0 * dot(m, g);
+            }
+
+            void main() {
+                vec3 pos = position;
+
+                // 处理悬浮尘埃
+                if (aLine < -0.5) {
+                    vType = 3.0;
+                    float t = uTime * 0.2 + aRandom.x * 10.0;
+                    pos.x += sin(t) * 5.0;
+                    pos.z += cos(t * 0.7) * 5.0;
+                    pos.y += sin(t * 1.5) * 2.0;
+                    vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                    gl_Position = projectionMatrix * mvPosition;
+                    gl_PointSize = (2.0 + uScale * 2.0) * (30.0 / -mvPosition.z);
+                    return;
+                }
+
+                // === 核心地形逻辑 ===
+
+                // 1. 定义蜿蜒的河道曲线 (S形)
+                // 使用 noise 或 sin 组合来创建自然的弯曲
+                float riverCurve = sin(pos.z * 0.08) * 12.0 + sin(pos.z * 0.2) * 4.0;
+
+                // 2. 计算当前点距离河道中心的距离
+                float distToRiver = abs(pos.x - riverCurve);
+
+                // 3. 区域划分
+                // River Zone: 距离中心很近 (< 4.0)
+                // Void Zone (黑色留白): 距离中心中等 (4.0 ~ 12.0)
+                // Mountain Zone: 距离中心较远 (> 12.0)
+
+                float height = 0.0;
+                float pointSize = 0.0;
+
+                if (distToRiver < 3.5) {
+                    // --- 河流 ---
+                    vType = 0.0;
+                    // 河流是流动的，使用 uTime
+                    float flow = snoise(vec2(pos.x * 0.5, pos.z * 0.2 - uTime * 0.8));
+                    height = flow * 0.8;
+
+                    // 河流边缘渐隐
+                    pointSize = 3.8 * (1.0 - distToRiver / 3.5);
+                    // 增加一些随机闪烁
+                    vIntensity = 0.8 + 0.5 * sin(uTime * 5.0 + aRandom.x * 20.0);
+                }
+                else if (distToRiver < 10.0 + (1.0-uScale)*5.0) {
+                    // --- 黑色虚空 (留白) ---
+                    // 这里不显示粒子，制造强烈的对比
+                    vType = 2.0;
+                    pointSize = 0.0; // 隐藏
+                }
+                else {
+                    // --- 山脉 ---
+                    vType = 1.0;
+
+                    // 山脉起始距离偏移
+                    float mDist = distToRiver - 10.0;
+
+                    // 噪声采样：拉伸 X 和 Z 的比例来制造“层状”感
+                    float n1 = snoise(vec2(pos.x * 0.05, pos.z * 0.08));
+                    float n2 = snoise(vec2(pos.x * 0.15, pos.z * 0.15));
+
+                    // 山脉高度计算
+                    // 距离河越远，山越高 (mDist)
+                    // 叠加噪声
+                    height = (abs(n1) * 12.0 + n2 * 3.5) * (mDist * 0.08);
+
+                    // 限制最大高度，防止穿帮
+                    height = clamp(height, 0.0, 35.0);
+
+                    // 手势控制高度爆发
+                    height *= (0.6 + uScale * 1.5);
+
+                    // 粒子大小：山脊线处密集且大，低处小
+                    // 利用 height 决定大小
+                    pointSize = 1.5 + height * 0.08;
+
+                    // 为了让线条感更强，利用 aLine (行索引) 做一些剔除
+                    // 每隔几行显示得更亮/更大，模拟层积岩
+                    float linePattern = sin(aLine * 180.0);
+                    if (linePattern > 0.55) {
+                        pointSize *= 1.25;
+                        vIntensity = 1.18;
+                    } else {
+                        vIntensity = 0.68;
+                    }
+                }
+
+                pos.y = height;
+                vHeight = height;
+
+                vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+                gl_Position = projectionMatrix * mvPosition;
+
+                // 距离衰减
+                gl_PointSize = pointSize * (40.0 / -mvPosition.z);
+            }
+        `;
+
+        const fragmentShader = `
+            uniform vec3 uColorRiver;
+            uniform vec3 uColorMtBase;
+            uniform vec3 uColorMtTop;
+
+            varying float vType;
+            varying float vHeight;
+            varying float vIntensity;
+
+            void main() {
+                // 如果是虚空区域，直接丢弃像素
+                if (vType > 1.5 && vType < 2.5) discard;
+
+                // 粒子形状：圆形模糊
+                vec2 uv = gl_PointCoord.xy - 0.5;
+                float d = length(uv);
+                if (d > 0.5) discard;
+
+                // 边缘柔化
+                float alpha = 1.0 - smoothstep(0.2, 0.5, d);
+
+                vec3 color = vec3(0.0);
+
+                if (vType < 0.5) {
+                    // 河流：金色/橙色
+                    color = uColorRiver;
+                    // 中心更亮
+                    color += vec3(0.22, 0.13, 0.06);
+                } else if (vType > 2.5) {
+                    // 悬浮尘埃：白色
+                    color = vec3(1.0);
+                    alpha *= 0.5;
+                } else {
+                    // 山脉：根据高度渐变
+                    float hFactor = clamp(vHeight / 25.0, 0.0, 1.0);
+                    // 颜色从深蓝到亮青
+                    color = mix(uColorMtBase, uColorMtTop, hFactor);
+
+                    // 高亮部分 (山脊)
+                    color *= vIntensity;
+                    // 让最高的山峰带一点白色
+                    if (hFactor > 0.8) color += vec3(0.2);
+                }
+
+                gl_FragColor = vec4(color, alpha);
+            }
+        `;
+
+        const uniforms = {
+            uTime: { value: 0 },
+            uScale: { value: 0.0 }, // 初始平缓
+            uColorRiver: { value: CONFIG.colorRiver },
+            uColorMtBase: { value: CONFIG.colorMtBase },
+            uColorMtTop: { value: CONFIG.colorMtTop }
+        };
+
+        const material = new THREE.ShaderMaterial({
+            vertexShader, fragmentShader, uniforms,
+            transparent: true,
+            depthWrite: false, // 粒子不需要写入深度，防止遮挡问题
+            blending: THREE.AdditiveBlending // 叠加模式，越密越亮
+        });
+
+        const particleSystem = new THREE.Points(geometry, material);
+        scene.add(particleSystem);
+
+        // ================= 4. 动画循环 =================
+        const clock = new THREE.Clock();
+        let targetScale = 0.2;
+        let currentScale = 0.2;
+        let isHandActive = false;
+        let handLostFrames = 0;
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const t = clock.getElapsedTime();
+
+            // 手势平滑处理
+            if (!isHandActive) {
+                handLostFrames++;
+                if (handLostFrames > 20) {
+                    targetScale = 0.2 + Math.sin(t * 0.5) * 0.1; // 待机呼吸
+                }
+            } else {
+                handLostFrames = 0;
+            }
+
+            // 缓动
+            currentScale += (targetScale - currentScale) * 0.05;
+
+            uniforms.uTime.value = t;
+            uniforms.uScale.value = currentScale;
+
+            // 缓慢向前推进的效果 (移动相机)
+            // 实际上我们可以移动 geometry 或者 offset，这里简单移动相机 z
+            // 为了无限循环，通常是在 shader 里做 offset，这里简化处理：仅轻微摆动
+            scene.rotation.y = Math.sin(t * 0.05) * 0.012;
+            sunGlow.material.opacity = 0.035 + currentScale * 0.025;
+            sun.material.opacity = 0.62 + currentScale * 0.12;
+
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        // ================= 5. UI 事件 =================
+        document.getElementById('fs-btn').addEventListener('click', () => {
+             if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+             else document.exitFullscreen();
+        });
+
+        // ================= 6. MediaPipe 集成 =================
+        const videoElement = document.getElementById('cam-video');
+        const canvasElement = document.getElementById('output-canvas');
+        const canvasCtx = canvasElement.getContext('2d');
+        const statusText = document.getElementById('status-text');
+        let modelReady = false;
+        let frameProcessing = false;
+
+        function resizeCanvas() {
+            canvasElement.width = videoElement.videoWidth || 160;
+            canvasElement.height = videoElement.videoHeight || 120;
+        }
+
+        function onResults(results) {
+            modelReady = true;
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                isHandActive = true;
+                statusText.innerText = "手势控制中 (张开幅度控制山高)";
+
+                for (const landmarks of results.multiHandLandmarks) {
+                    drawConnectors(canvasCtx, landmarks, HAND_CONNECTIONS, {color: 'rgba(1,75,61,0.97)', lineWidth: 2});
+                    drawLandmarks(canvasCtx, landmarks, {color: '#0059ff', lineWidth: 1});
+
+                    // 计算手掌张开程度
+                    const wrist = landmarks[0];
+                    const middleTip = landmarks[12];
+                    const distance = Math.sqrt(Math.pow(wrist.x - middleTip.x, 2) + Math.pow(wrist.y - middleTip.y, 2));
+
+                    // 映射到 0.0 ~ 1.0
+                    let val = (distance - 0.15) * 3.0;
+                    targetScale = Math.max(0.0, Math.min(1.2, val));
+                }
+            } else {
+                isHandActive = false;
+                statusText.innerText = modelReady ? "请将手放入镜头区域" : "正在加载手势模型...";
+            }
+            canvasCtx.restore();
+        }
+
+        const hands = new Hands({
+            locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+        });
+        hands.setOptions({
+            maxNumHands: 1,
+            modelComplexity: 0, // 降低模型复杂度以提升性能，因为粒子系统很重
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+        hands.onResults(onResults);
+
+        const cameraUtils = new Camera(videoElement, {
+            onFrame: async () => {
+                if (frameProcessing) return;
+                if(canvasElement.width !== videoElement.videoWidth) resizeCanvas();
+                frameProcessing = true;
+                try {
+                    await hands.send({image: videoElement});
+                } catch (error) {
+                    console.error('MediaPipe 手势帧处理失败:', error);
+                    statusText.innerText = "手势模型处理失败，请刷新页面重试";
+                } finally {
+                    frameProcessing = false;
+                }
+            },
+            width: 320,
+            height: 240
+        });
+
+        cameraUtils.start()
+            .then(() => {
+                if (!modelReady) statusText.innerText = "正在加载手势模型...";
+            })
+            .catch(error => {
+                console.error('摄像头启动失败:', error);
+                statusText.innerText = "摄像头未授权或不可用";
+            });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

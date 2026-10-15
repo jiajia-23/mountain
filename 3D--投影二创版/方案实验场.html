@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>实体景观投影实验场</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #07100f; font-family: "Segoe UI", sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #panel { position: fixed; z-index: 2; top: 20px; left: 20px; width: 280px; padding: 18px; border: 1px solid rgba(191, 229, 191, .2); background: rgba(4, 13, 12, .78); backdrop-filter: blur(10px); }
+    h1 { margin: 0 0 6px; color: #d9f1c7; font-size: 16px; letter-spacing: 3px; }
+    p { margin: 0 0 14px; color: rgba(220, 235, 215, .64); font-size: 11px; line-height: 1.6; }
+    .modes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    button { padding: 9px 6px; border: 1px solid rgba(186, 225, 183, .35); background: transparent; color: #cde2c8; cursor: pointer; font-size: 11px; }
+    button.active, button:hover { border-color: #d8bd72; color: #f0d993; background: rgba(216, 189, 114, .12); }
+    #status { margin-top: 13px; color: #aebea8; font-size: 11px; }
+    #hint { position: fixed; right: 20px; bottom: 18px; z-index: 2; color: rgba(220, 235, 215, .5); font-size: 11px; }
+    #camera { position: fixed; right: 20px; bottom: 40px; width: 160px; height: 120px; opacity: .3; display: none; transform: scaleX(-1); border: 1px solid rgba(220,235,215,.3); }
+    #camera video, #camera canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #camera canvas { transform: scaleX(-1); }
+    .small { margin-top: 10px; opacity: .65; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <section id="panel">
+    <h1>实体景观 / 光的草图</h1>
+    <p>四个不依赖原粒子山水的投影方向。张开手掌会增强当前空间的“呼吸”，鼠标也可直接试用。</p>
+    <div class="modes">
+      <button class="active" data-mode="moss">苔藓呼吸场</button>
+      <button data-mode="mountain">一分钟的山</button>
+      <button data-mode="window">墙体是一扇窗口</button>
+      <button data-mode="cloud">云是一种生物</button>
+    </div>
+    <div id="status">正在启动摄像头与手势模型...</div>
+    <p class="small">按 H 隐藏面板 · 按 C 显示摄像头</p>
+  </section>
+  <div id="camera"><video id="video" autoplay muted playsinline></video><canvas id="hand"></canvas></div>
+  <div id="hint">移动鼠标 / 张合手掌 / 点击切换方案</div>
+  <script>
+    const canvas = document.querySelector("#scene");
+    const ctx = canvas.getContext("2d");
+    const status = document.querySelector("#status");
+    const cameraBox = document.querySelector("#camera");
+    const video = document.querySelector("#video");
+    const handCanvas = document.querySelector("#hand");
+    const handCtx = handCanvas.getContext("2d");
+    let width = 0, height = 0, mode = "moss", inputX = .5, inputY = .5, openness = .25, modelReady = false;
+    let lastTime = performance.now(), elapsed = 0;
+    const particles = Array.from({ length: 90 }, (_, i) => ({ seed: i * 17.13, x: Math.random(), y: Math.random(), size: 1 + Math.random() * 3 }));
+    const buttons = [...document.querySelectorAll("[data-mode]")];
+
+    function resize() { width = canvas.width = innerWidth * devicePixelRatio; height = canvas.height = innerHeight * devicePixelRatio; canvas.style.width = innerWidth + "px"; canvas.style.height = innerHeight + "px"; ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0); }
+    addEventListener("resize", resize); resize();
+    buttons.forEach(button => button.addEventListener("click", () => { mode = button.dataset.mode; buttons.forEach(item => item.classList.toggle("active", item === button)); }));
+    addEventListener("mousemove", event => { inputX = event.clientX / innerWidth; inputY = event.clientY / innerHeight; openness = .35 + Math.sin(elapsed * .7) * .12; });
+    addEventListener("keydown", event => { if (event.key.toLowerCase() === "h") document.querySelector("#panel").hidden = !document.querySelector("#panel").hidden; if (event.key.toLowerCase() === "c") cameraBox.style.display = cameraBox.style.display === "block" ? "none" : "block"; });
+
+    function background(color) { ctx.fillStyle = color; ctx.fillRect(0, 0, innerWidth, innerHeight); }
+    function glow(x, y, radius, color, alpha) { const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius); gradient.addColorStop(0, color.replace("ALPHA", alpha)); gradient.addColorStop(1, color.replace("ALPHA", "0")); ctx.fillStyle = gradient; ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2); }
+    function line(points, color, widthPx = 1) { ctx.beginPath(); points.forEach((point, index) => index ? ctx.lineTo(point[0], point[1]) : ctx.moveTo(point[0], point[1])); ctx.strokeStyle = color; ctx.lineWidth = widthPx; ctx.stroke(); }
+
+    function drawMoss(t) {
+      background("#071311");
+      const pulse = .5 + openness * .9 + Math.sin(t * .8) * .08;
+      glow(innerWidth * (.35 + inputX * .3), innerHeight * (.55 + inputY * .1), innerWidth * .48, "rgba(83,154,89,ALPHA)", .16 * pulse);
+      for (let i = 0; i < 20; i++) {
+        const points = [];
+        for (let x = -30; x < innerWidth + 40; x += 16) {
+          const y = innerHeight * (.68 + i * .012) + Math.sin(x * .008 + t * (.16 + i * .004) + i) * (15 + pulse * 18) + Math.sin(x * .022 + i) * 7;
+          points.push([x, y]);
+        }
+        line(points, `rgba(${55 + i * 3},${118 + i * 3},${69 + i * 2},${.13 + pulse * .012})`, 1.1 + i * .035);
+      }
+      particles.forEach(p => { const x = (p.x * innerWidth + Math.sin(t * .2 + p.seed) * 25) % innerWidth; const y = innerHeight * (.35 + p.y * .45) + Math.sin(t + p.seed) * 10 * pulse; ctx.fillStyle = `rgba(177,219,133,${.16 + .2 * pulse})`; ctx.fillRect(x, y, p.size, p.size); });
+      glow(innerWidth * inputX, innerHeight * inputY, 120 + pulse * 100, "rgba(197,224,127,ALPHA)", .12);
+    }
+
+    function drawMountain(t) {
+      const phase = (t / 75) % 1;
+      const sun = Math.sin(phase * Math.PI * 2) * .5 + .5;
+      const sky = ctx.createLinearGradient(0, 0, 0, innerHeight); sky.addColorStop(0, `rgb(${8 + sun * 25},${18 + sun * 28},${34 + sun * 30})`); sky.addColorStop(1, "#111a1b"); ctx.fillStyle = sky; ctx.fillRect(0, 0, innerWidth, innerHeight);
+      glow(innerWidth * (.18 + phase * .68), innerHeight * (.25 + inputY * .08), 130 + openness * 150, "rgba(244,181,105,ALPHA)", .18 + openness * .12);
+      for (let layer = 0; layer < 5; layer++) {
+        const base = innerHeight * (.66 + layer * .07);
+        const points = [[-30, innerHeight]];
+        for (let x = -30; x <= innerWidth + 30; x += 18) points.push([x, base - Math.abs(Math.sin(x * .004 + layer * 1.4) * 90 + Math.sin(x * .012 + t * .04) * 15) * (1 - layer * .12)]);
+        points.push([innerWidth + 30, innerHeight]); points.push([-30, innerHeight]);
+        ctx.beginPath();
+        points.forEach((point, index) => index ? ctx.lineTo(point[0], point[1]) : ctx.moveTo(point[0], point[1]));
+        ctx.closePath();
+        ctx.fillStyle = `rgba(${19 + layer * 12},${34 + layer * 13},${42 + layer * 13},${.72 - layer * .1})`;
+        ctx.fill();
+      }
+      line([[0, innerHeight * .69], [innerWidth * .22, innerHeight * .48], [innerWidth * .41, innerHeight * .59], [innerWidth * .62, innerHeight * .4], [innerWidth, innerHeight * .55]], `rgba(214,190,133,${.2 + openness * .2})`, 2);
+    }
+
+    function drawWindow(t) {
+      background("#080d12");
+      const left = innerWidth * .13, right = innerWidth * .87, top = innerHeight * .13, bottom = innerHeight * .87;
+      ctx.fillStyle = "#182a2c"; ctx.fillRect(left, top, right - left, bottom - top);
+      ctx.save(); ctx.beginPath(); ctx.rect(left, top, right - left, bottom - top); ctx.clip();
+      const drift = (inputX - .5) * 180;
+      for (let i = 0; i < 7; i++) {
+        const y = innerHeight * (.68 - i * .075) + Math.sin(t * .1 + i) * 8;
+        line([[left - 50, y], [left + 170 + drift, y - 70 - i * 8], [left + 410 + drift, y - 20], [right + 50, y - 100 + i * 3]], `rgba(${57 + i * 14},${101 + i * 13},${96 + i * 15},${.18 + openness * .04})`, 3 + i * .8);
+      }
+      glow(left + (right - left) * inputX, top + (bottom - top) * inputY, 170 + openness * 180, "rgba(225,193,117,ALPHA)", .12);
+      ctx.restore();
+      ctx.strokeStyle = "rgba(201,220,195,.4)"; ctx.lineWidth = 2; ctx.strokeRect(left, top, right - left, bottom - top);
+    }
+
+    function drawCloud(t) {
+      background("#091312");
+      const cx = innerWidth * (.5 + (inputX - .5) * .22), cy = innerHeight * (.48 + (inputY - .5) * .18), breathe = 1 + Math.sin(t * .55) * .08 + openness * .22;
+      glow(cx, cy, 240 * breathe, "rgba(138,190,157,ALPHA)", .2);
+      for (let i = 0; i < 18; i++) {
+        const a = i * Math.PI * 2 / 18 + t * .08, r = (80 + Math.sin(t * .7 + i) * 24) * breathe;
+        const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r * .48;
+        glow(x, y, 55 + openness * 60, "rgba(180,222,178,ALPHA)", .08);
+        ctx.beginPath(); ctx.arc(x, y, 8 + openness * 15, 0, Math.PI * 2); ctx.fillStyle = "rgba(179,218,176,.18)"; ctx.fill();
+      }
+      line([[cx - 240, cy + 120], [cx - 90, cy + 75], [cx + 80, cy + 105], [cx + 250, cy + 54]], "rgba(190,221,174,.25)", 1);
+    }
+
+    function render(now) {
+      const delta = Math.min((now - lastTime) / 1000, .05); lastTime = now; elapsed += delta;
+      if (mode === "moss") drawMoss(elapsed); else if (mode === "mountain") drawMountain(elapsed); else if (mode === "window") drawWindow(elapsed); else drawCloud(elapsed);
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+
+    async function startHands() {
+      try {
+        const hands = new Hands({ locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: .55, minTrackingConfidence: .55 });
+        hands.onResults(results => {
+          modelReady = true;
+          if (!results.multiHandLandmarks?.length) { status.textContent = "手势模型已就绪 · 请将手放入镜头"; return; }
+          const hand = results.multiHandLandmarks[0], wrist = hand[0], tip = hand[12];
+          inputX = 1 - wrist.x; inputY = wrist.y;
+          openness = Math.max(0, Math.min(1, (Math.hypot(wrist.x - tip.x, wrist.y - tip.y) - .15) * 3));
+          status.textContent = "手势控制中 · 张开幅度 " + Math.round(openness * 100) + "%";
+          handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height);
+          drawConnectors(handCtx, hand, HAND_CONNECTIONS, { color: "rgba(215,230,180,.8)", lineWidth: 2 });
+        });
+        const camera = new Camera(video, { width: 320, height: 240, onFrame: async () => { handCanvas.width = video.videoWidth || 320; handCanvas.height = video.videoHeight || 240; await hands.send({ image: video }); } });
+        await camera.start();
+        status.textContent = "摄像头已启动 · 正在加载手势模型...";
+      } catch (error) {
+        console.error("手势模型启动失败:", error);
+        status.textContent = "摄像头不可用 · 当前使用鼠标交互";
+      }
+    }
+    startHands();
+  </script>
+</body>
+</html>

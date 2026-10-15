@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>借一束光，唤醒山谷</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #050b12; font-family: "Segoe UI", sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #panel { position: fixed; z-index: 3; top: 24px; left: 28px; width: 310px; padding: 20px; border: 1px solid rgba(244, 209, 137, .3); background: rgba(5, 12, 20, .7); backdrop-filter: blur(12px); }
+    h1 { margin: 0 0 5px; color: #f1d18b; font-size: 18px; letter-spacing: 3px; font-weight: 500; }
+    h2 { margin: 0 0 15px; color: rgba(215, 225, 215, .54); font-size: 10px; letter-spacing: 2px; font-weight: 400; }
+    p { margin: 0; color: rgba(218, 229, 221, .68); font-size: 11px; line-height: 1.75; }
+    #stage { margin-top: 14px; color: #f3d695; font-size: 12px; letter-spacing: 1px; }
+    #instruction { margin-top: 9px; color: rgba(218, 229, 221, .45); font-size: 10px; }
+    #hint { position: fixed; z-index: 3; right: 26px; bottom: 20px; color: rgba(225, 231, 220, .48); font-size: 11px; letter-spacing: 1px; }
+    #camera { position: fixed; z-index: 4; right: 24px; bottom: 40px; display: none; width: 160px; height: 120px; border: 1px solid rgba(225, 231, 220, .3); opacity: .32; transform: scaleX(-1); }
+    #camera video, #camera canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #camera canvas { transform: scaleX(-1); }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <section id="panel">
+    <h1>借一束光，唤醒山谷</h1>
+    <h2>THE VALLEY REMEMBERS LIGHT</h2>
+    <p>不要控制太阳。请把手伸向山谷，慢慢抬起，让一束光从你的身体经过，唤醒墙面背后的山、云和树影。</p>
+    <div id="stage">正在等待你靠近</div>
+    <div id="instruction">移动鼠标可模拟手势 · H 隐藏说明 · C 显示摄像头</div>
+  </section>
+  <div id="camera"><video id="video" autoplay muted playsinline></video><canvas id="hand"></canvas></div>
+  <div id="hint">靠近 · 聚拢 · 抬手 · 停留</div>
+  <script>
+    const canvas = document.querySelector("#scene"), ctx = canvas.getContext("2d");
+    const stage = document.querySelector("#stage"), video = document.querySelector("#video");
+    const cameraBox = document.querySelector("#camera"), handCanvas = document.querySelector("#hand"), handCtx = handCanvas.getContext("2d");
+    let w = 0, h = 0, dpr = 1, now = 0, last = performance.now();
+    let handPresent = false, manualInputUntil = 0, handX = .5, handY = .78, openness = 0, rise = 0, sunrise = 0, cloudOpen = 0, warmth = 0;
+    let holdTime = 0, phase = "idle", phaseTarget = "idle";
+    const trees = Array.from({ length: 28 }, (_, i) => ({ x: (i + 1) / 29, height: .1 + ((i * 17) % 11) / 80, side: i % 2 ? 1 : -1 }));
+    const dust = Array.from({ length: 180 }, (_, i) => ({ seed: i * 13.7, x: Math.random(), y: Math.random(), size: .5 + Math.random() * 2 }));
+    const stars = Array.from({ length: 70 }, (_, i) => ({ x: Math.random(), y: Math.random() * .48, a: .15 + Math.random() * .45 }));
+
+    function resize() { dpr = Math.min(devicePixelRatio, 1.5); w = innerWidth; h = innerHeight; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+    addEventListener("resize", resize); resize();
+    addEventListener("keydown", e => { if (e.key.toLowerCase() === "h") document.querySelector("#panel").hidden = !document.querySelector("#panel").hidden; if (e.key.toLowerCase() === "c") cameraBox.style.display = cameraBox.style.display === "block" ? "none" : "block"; });
+    addEventListener("mousemove", e => { handPresent = true; manualInputUntil = performance.now() + 900; handX = e.clientX / w; handY = e.clientY / h; openness = .72; });
+    addEventListener("mouseleave", () => { handPresent = false; manualInputUntil = 0; });
+
+    function color(r, g, b, a) { return `rgba(${r},${g},${b},${a})`; }
+    function glow(cx, cy, radius, rgb, alpha) { const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius); g.addColorStop(0, color(...rgb, alpha)); g.addColorStop(.35, color(...rgb, alpha * .36)); g.addColorStop(1, color(...rgb, 0)); ctx.fillStyle = g; ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2); }
+    function path(points, fill, stroke) { ctx.beginPath(); points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.closePath(); if (fill) { ctx.fillStyle = fill; ctx.fill(); } if (stroke) { ctx.strokeStyle = stroke; ctx.stroke(); } }
+    function mountain(base, peak, colorValue, offset, opacity) {
+      const points = [[-40, h], [-40, base]];
+      for (let x = -40; x <= w + 40; x += 20) {
+        const y = base - Math.abs(Math.sin(x * .004 + offset) * peak + Math.sin(x * .011 + offset * 1.7) * peak * .22);
+        points.push([x, y]);
+      }
+      points.push([w + 40, h]); path(points, colorValue.replace("ALPHA", opacity));
+    }
+    function updatePhase(dt) {
+      if (!handPresent) { openness += (0 - openness) * dt * .5; rise += (0.08 - rise) * dt * .08; }
+      const desiredRise = handPresent ? Math.max(0, Math.min(1, (1 - handY) * 1.22)) : .08;
+      rise += (desiredRise - rise) * Math.min(1, dt * 2.5);
+      if (handPresent && openness > .36) holdTime += dt; else holdTime = Math.max(0, holdTime - dt * .35);
+      if (!handPresent && sunrise > .12) phaseTarget = "afterglow";
+      else if (holdTime > 3.5 && rise > .52) phaseTarget = "valley";
+      else if (rise > .2 && openness > .25) phaseTarget = "rising";
+      else if (openness > .15) phaseTarget = "gathering";
+      else phaseTarget = "noticed";
+      const targets = { idle: 0, noticed: .12, gathering: .3, rising: .68, valley: 1, afterglow: .52 };
+      if (phaseTarget === "valley") sunrise = Math.min(1, sunrise + dt * .055);
+      else if (phaseTarget === "afterglow") sunrise = Math.max(.18, sunrise - dt * .012);
+      else sunrise += (targets[phaseTarget] - sunrise) * Math.min(1, dt * .65);
+      cloudOpen += ((phaseTarget === "valley" ? 1 : Math.max(0, sunrise - .45) * .25) - cloudOpen) * Math.min(1, dt * .4);
+      warmth += ((sunrise * .86 + (phaseTarget === "afterglow" ? .18 : 0)) - warmth) * Math.min(1, dt * .6);
+      phase = phaseTarget;
+      const labels = { idle: "正在等待你靠近", noticed: "它注意到你了 · 山后有微光", gathering: "伸出手掌 · 光正在聚拢", rising: "抬起手 · 太阳正在升起", valley: "山谷已醒 · 请停留片刻", afterglow: "余晖仍在 · 场景不会归零" };
+      stage.textContent = labels[phase];
+    }
+    function renderScene() {
+      const sunX = w * (.5 + (handX - .5) * .22), horizon = h * .67, sunY = horizon + h * .13 - sunrise * h * .42;
+      const sky = ctx.createLinearGradient(0, 0, 0, h);
+      sky.addColorStop(0, color(4 + warmth * 12, 13 + warmth * 17, 25 + warmth * 18, 1));
+      sky.addColorStop(.55, color(8 + warmth * 34, 25 + warmth * 25, 34 + warmth * 15, 1));
+      sky.addColorStop(1, color(7 + warmth * 17, 18 + warmth * 18, 18 + warmth * 7, 1));
+      ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h);
+      stars.forEach(s => { ctx.fillStyle = color(190, 207, 184, s.a * (1 - warmth * .86)); ctx.fillRect(s.x * w, s.y * h, 1.2, 1.2); });
+      if (phase === "noticed" || phase === "gathering") glow(sunX, horizon + 5, 130 + sunrise * 170, [164, 194, 129], .06 + openness * .08);
+      const sunRadius = 25 + sunrise * 76;
+      glow(sunX, sunY, 190 + sunrise * 210, [242, 156, 72], .06 + sunrise * .12);
+      glow(sunX, sunY, 75 + sunrise * 90, [255, 194, 96], .16 + sunrise * .2);
+      ctx.beginPath(); ctx.arc(sunX, sunY, sunRadius, 0, Math.PI * 2); ctx.fillStyle = color(255, 194 + warmth * 30, 105 + warmth * 35, .35 + sunrise * .38); ctx.fill();
+      mountain(horizon + 70, 130, "rgba(9,22,29,ALPHA)", 1.1, .96);
+      mountain(horizon + 30, 175, "rgba(13,37,40,ALPHA)", 2.2, .95);
+      mountain(horizon - 4, 205, "rgba(19,55,49,ALPHA)", 3.4, .92 * (1 - sunrise * .08));
+      mountain(horizon + 52, 105, "rgba(6,19,25,ALPHA)", 4.6, .96);
+      const reveal = Math.max(0, sunrise - .18);
+      ctx.save(); ctx.globalAlpha = reveal;
+      mountain(horizon - 38, 225, "rgba(41,82,64,ALPHA)", 5.7, .7);
+      for (let i = 0; i < 5; i++) {
+        const y = horizon - 18 - i * 24 + Math.sin(now * .0002 + i) * 4;
+        ctx.fillStyle = color(179, 174, 112, .055 + warmth * .05); ctx.fillRect(0, y, w, 2);
+      }
+      ctx.restore();
+      ctx.save(); ctx.globalAlpha = .72 + sunrise * .2;
+      for (let i = 0; i < 28; i++) {
+        const tree = trees[i], tx = tree.x * w, ground = horizon + 30 + Math.sin(tree.x * 8) * 12, th = tree.height * h * (.6 + sunrise * .18);
+        ctx.strokeStyle = color(5, 17, 16, .75); ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(tx, ground); ctx.lineTo(tx + Math.sin(now * .00012 + i) * 12 * (1 - warmth), ground - th); ctx.stroke();
+        ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(tx, ground - th * .52); ctx.lineTo(tx - 14, ground - th * .68); ctx.moveTo(tx, ground - th * .62); ctx.lineTo(tx + 14, ground - th * .76); ctx.stroke();
+      }
+      ctx.restore();
+      if (cloudOpen < .95) {
+        ctx.fillStyle = color(105, 134, 123, .12 + (1 - cloudOpen) * .1);
+        ctx.beginPath(); ctx.ellipse(w * .22, horizon - 40 - cloudOpen * 28, w * .24, 42, -.1, 0, Math.PI * 2); ctx.ellipse(w * .76, horizon - 62 - cloudOpen * 22, w * .25, 48, .1, 0, Math.PI * 2); ctx.fill();
+      }
+      dust.forEach(p => { const dx = (p.x * w + Math.sin(now * .00008 + p.seed) * 34) % w, dy = (p.y * h + Math.cos(now * .00012 + p.seed) * 18 + h) % h; ctx.fillStyle = color(220, 202, 143, .05 + warmth * .12); ctx.fillRect(dx, dy, p.size, p.size); });
+      if (phase === "valley") { ctx.fillStyle = color(246, 217, 148, .16); ctx.fillRect(0, horizon - 1, w, 2); }
+    }
+    function loop(nowValue) { const dt = Math.min((nowValue - last) / 1000, .05); last = nowValue; now = nowValue; updatePhase(dt); renderScene(); requestAnimationFrame(loop); }
+    requestAnimationFrame(loop);
+    async function startHands() {
+      try {
+        const hands = new Hands({ locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: .55, minTrackingConfidence: .55 });
+        hands.onResults(results => {
+          if (!results.multiHandLandmarks?.length) {
+            if (performance.now() > manualInputUntil) handPresent = false;
+            return;
+          }
+          handPresent = true; manualInputUntil = 0;
+          const hand = results.multiHandLandmarks[0], wrist = hand[0], tip = hand[12];
+          handX = 1 - wrist.x; handY = wrist.y; openness = Math.max(0, Math.min(1, (Math.hypot(wrist.x - tip.x, wrist.y - tip.y) - .15) * 3));
+          handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height); drawConnectors(handCtx, hand, HAND_CONNECTIONS, { color: "rgba(241,210,143,.85)", lineWidth: 2 });
+        });
+        const camera = new Camera(video, { width: 320, height: 240, onFrame: async () => { handCanvas.width = video.videoWidth || 320; handCanvas.height = video.videoHeight || 240; await hands.send({ image: video }); } });
+        await camera.start(); stage.textContent = "摄像头已启动 · 正在等待你靠近";
+      } catch (error) { console.error("手势模型启动失败:", error); stage.textContent = "摄像头不可用 · 当前使用鼠标交互"; }
+    }
+    startHands();
+  </script>
+</body>
+</html>

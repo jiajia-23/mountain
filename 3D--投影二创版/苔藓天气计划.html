@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>苔藓天气计划 / Moss Weather Project</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; background: #07110d; font-family: "Segoe UI", sans-serif; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #panel { position: fixed; z-index: 2; left: 28px; top: 26px; width: 300px; padding: 20px; border: 1px solid rgba(222, 205, 135, .28); background: rgba(8, 18, 13, .72); backdrop-filter: blur(12px); }
+    h1 { margin: 0 0 5px; color: #ead89b; font-size: 17px; letter-spacing: 3px; font-weight: 500; }
+    h2 { margin: 0 0 15px; color: rgba(221, 232, 191, .62); font-size: 10px; letter-spacing: 2px; font-weight: 400; }
+    p { margin: 0; color: rgba(221, 232, 210, .65); font-size: 11px; line-height: 1.7; }
+    #status { margin-top: 15px; color: #e5d38f; font-size: 11px; }
+    #hint { position: fixed; z-index: 2; right: 28px; bottom: 22px; color: rgba(221, 232, 210, .5); font-size: 11px; letter-spacing: 1px; }
+    #camera { position: fixed; z-index: 3; right: 26px; bottom: 42px; display: none; width: 160px; height: 120px; border: 1px solid rgba(221, 232, 210, .3); opacity: .34; transform: scaleX(-1); }
+    #camera video, #camera canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+    #camera canvas { transform: scaleX(-1); }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <section id="panel">
+    <h1>苔藓天气计划</h1>
+    <h2>MOSS WEATHER PROJECT / 光、雾与生长</h2>
+    <p>以 Olafur Eliasson《The Weather Project》的沉浸式光场、雾与身体感为启发，将“太阳”缩小成苔藓内部的一枚湿润核心。投影不是一幅风景，而是一种正在墙体里发生的天气。</p>
+    <div id="status">正在启动手势模型...</div>
+  </section>
+  <div id="camera"><video id="video" autoplay muted playsinline></video><canvas id="hand"></canvas></div>
+  <div id="hint">张开手掌：光场扩张 · 移动手掌：改变天气中心 · H 隐藏说明 · C 摄像头</div>
+  <script>
+    const canvas = document.querySelector("#scene"), ctx = canvas.getContext("2d");
+    const status = document.querySelector("#status"), video = document.querySelector("#video");
+    const cameraBox = document.querySelector("#camera"), handCanvas = document.querySelector("#hand"), handCtx = handCanvas.getContext("2d");
+    let w = 0, h = 0, dpr = 1, t = 0, last = performance.now(), x = .5, y = .58, openness = .36;
+    const veins = Array.from({ length: 32 }, (_, i) => ({ seed: i * 19.71, side: i % 2 ? 1 : -1 }));
+    const spores = Array.from({ length: 150 }, (_, i) => ({ seed: i * 31.7, x: Math.random(), y: Math.random(), radius: .6 + Math.random() * 2.2 }));
+    function resize() { dpr = Math.min(devicePixelRatio, 1.5); w = innerWidth; h = innerHeight; canvas.width = w * dpr; canvas.height = h * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0); }
+    addEventListener("resize", resize); resize();
+    addEventListener("mousemove", e => { x = e.clientX / w; y = e.clientY / h; openness = .45 + Math.sin(t * .7) * .08; });
+    addEventListener("keydown", e => { if (e.key.toLowerCase() === "h") document.querySelector("#panel").hidden = !document.querySelector("#panel").hidden; if (e.key.toLowerCase() === "c") cameraBox.style.display = cameraBox.style.display === "block" ? "none" : "block"; });
+    function rgba(r, g, b, a) { return `rgba(${r},${g},${b},${a})`; }
+    function glow(cx, cy, radius, color, alpha) { const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius); g.addColorStop(0, rgba(...color, alpha)); g.addColorStop(.28, rgba(...color, alpha * .46)); g.addColorStop(1, rgba(...color, 0)); ctx.fillStyle = g; ctx.fillRect(cx - radius, cy - radius, radius * 2, radius * 2); }
+    function path(points, stroke, width) { ctx.beginPath(); points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.strokeStyle = stroke; ctx.lineWidth = width; ctx.stroke(); }
+    function render(now) {
+      t += Math.min((now - last) / 1000, .05); last = now;
+      const breath = .82 + openness * .85 + Math.sin(t * .42) * .08;
+      const cx = w * (.18 + x * .64), cy = h * (.24 + y * .48);
+      const sky = ctx.createLinearGradient(0, 0, 0, h); sky.addColorStop(0, "#081813"); sky.addColorStop(.54, "#10261d"); sky.addColorStop(1, "#050c0a"); ctx.fillStyle = sky; ctx.fillRect(0, 0, w, h);
+      glow(cx, cy, Math.min(w, h) * (.34 + openness * .16), [216, 177, 91], .14 + openness * .08);
+      glow(cx, cy, Math.min(w, h) * (.12 + openness * .08), [255, 218, 126], .26 + openness * .15);
+      ctx.beginPath(); ctx.arc(cx, cy, Math.min(w, h) * (.055 + openness * .03), 0, Math.PI * 2); ctx.fillStyle = rgba(255, 220, 141, .42 + openness * .2); ctx.fill();
+      for (let layer = 0; layer < 10; layer++) {
+        const base = h * (.55 + layer * .045), points = [];
+        for (let px = -40; px <= w + 40; px += 16) {
+          const wave = Math.sin(px * (.004 + layer * .0004) + t * (.08 + layer * .006) + layer) * (18 + layer * 4) + Math.sin(px * .013 + layer * 2) * 8;
+          points.push([px, base + wave + Math.sin(px * .002 + t * .04) * 12 * breath]);
+        }
+        ctx.fillStyle = rgba(39 + layer * 4, 73 + layer * 7, 55 + layer * 6, .07 + layer * .012);
+        ctx.beginPath(); points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1])); ctx.lineTo(w + 40, h); ctx.lineTo(-40, h); ctx.closePath(); ctx.fill();
+      }
+      veins.forEach(v => {
+        const startX = w * (.5 + v.side * (.04 + (v.seed % 17) / 150)), startY = h * (.78 + (v.seed % 13) / 80), points = [[startX, startY]];
+        for (let j = 1; j < 8; j++) {
+          const p = points[j - 1], targetX = cx + (p[0] - cx) * .86 + Math.sin(t * .25 + v.seed + j) * 9, targetY = p[1] - (h * .035 + (v.seed % 7)); points.push([targetX, targetY]);
+        }
+        path(points, rgba(139, 173, 94, .08 + openness * .08), 1 + openness * .8);
+      });
+      spores.forEach(s => {
+        const drift = Math.sin(t * .16 + s.seed) * 18 + Math.cos(t * .09 + s.seed) * 9;
+        const sx = (s.x * w + drift + w) % w, sy = (s.y * h + Math.sin(t * .24 + s.seed) * 12 + h) % h;
+        const near = Math.max(0, 1 - Math.hypot(sx - cx, sy - cy) / (w * .55));
+        ctx.fillStyle = rgba(205, 221, 157, .08 + near * (.12 + openness * .16)); ctx.beginPath(); ctx.arc(sx, sy, s.radius * (1 + near * openness), 0, Math.PI * 2); ctx.fill();
+      });
+      glow(cx, cy, 80 + openness * 150, [185, 214, 112], .08);
+      requestAnimationFrame(render);
+    }
+    requestAnimationFrame(render);
+    async function startHands() {
+      try {
+        const hands = new Hands({ locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}` });
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 0, minDetectionConfidence: .55, minTrackingConfidence: .55 });
+        hands.onResults(results => {
+          if (!results.multiHandLandmarks?.length) { status.textContent = "手势模型已就绪 · 请将手放入镜头"; return; }
+          const hand = results.multiHandLandmarks[0], wrist = hand[0], tip = hand[12];
+          x = 1 - wrist.x; y = wrist.y; openness = Math.max(0, Math.min(1, (Math.hypot(wrist.x - tip.x, wrist.y - tip.y) - .15) * 3)); status.textContent = "天气正在回应 · 光场强度 " + Math.round(openness * 100) + "%";
+          handCtx.clearRect(0, 0, handCanvas.width, handCanvas.height); drawConnectors(handCtx, hand, HAND_CONNECTIONS, { color: "rgba(232,216,154,.8)", lineWidth: 2 });
+        });
+        const camera = new Camera(video, { width: 320, height: 240, onFrame: async () => { handCanvas.width = video.videoWidth || 320; handCanvas.height = video.videoHeight || 240; await hands.send({ image: video }); } });
+        await camera.start(); status.textContent = "摄像头已启动 · 正在加载手势模型...";
+      } catch (error) { console.error("手势模型启动失败:", error); status.textContent = "摄像头不可用 · 当前使用鼠标交互"; }
+    }
+    startHands();
+  </script>
+</body>
+</html>
