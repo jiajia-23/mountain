@@ -361,35 +361,36 @@
                     color=vec3(.82,.86,.77);
                     alpha*=.14+.05*sin(uTime*.32+vWorld.z*.05);
                 } else {
-                    // Mineral washes and irregular fibres; no height bands or contour lines.
-                    float pigment=waterNoise(vWorld.xz*.034+vec2(vHeight*.012,0.0));
-                    float heightWash=smoothstep(1.0,38.0,vHeight);
-                    float distanceWash=smoothstep(10.0,150.0,vDepth);
-                    // Reference palette: blue ink -> malachite -> moss -> ochre -> pale silk.
-                    vec3 ink=vec3(.035,.145,.165);
-                    vec3 mineral=vec3(.14,.36,.32);
-                    vec3 moss=vec3(.35,.46,.23);
-                    vec3 leaf=vec3(.62,.68,.34);
-                    vec3 ochre=vec3(.64,.55,.34);
-                    vec3 silk=vec3(.84,.82,.66);
-                    float wash=clamp(heightWash*.38+pigment*.52+distanceWash*.26,0.0,1.0);
-                    color=mix(ink,mineral,smoothstep(.08,.38,wash));
-                    color=mix(color,moss,smoothstep(.32,.62,wash));
-                    color=mix(color,ochre,smoothstep(.62,.88,wash)*.75);
-                    color=mix(color,silk,smoothstep(.84,1.0,wash)*.65);
-                    // Warm gold at low sun, fresh leaf in high light; preserve shaded blue-greens.
-                    float sunwash=smoothstep(.12,.92,diffuse);
-                    // A few mineral accents sit in the landscape, rather than tinting the water.
-                    float accent=waterNoise(vWorld.xz*.16+vec2(2.0,8.0));
-                    float cinnabar=smoothstep(.82,.94,accent)*(1.0-smoothstep(4.0,13.0,vHeight));
+                    // Spatial pigment fields follow the reference's dark/cool -> green -> ochre/ivory structure.
+                    vec3 ink=vec3(.018,.075,.105);
+                    vec3 mineral=vec3(.045,.43,.39);
+                    vec3 moss=vec3(.20,.40,.16);
+                    vec3 leaf=vec3(.66,.74,.24);
+                    vec3 ochre=vec3(.67,.46,.17);
+                    vec3 silk=vec3(.89,.86,.70);
+                    float pigment=waterNoise(vWorld.xz*.037+vec2(vHeight*.017,0.0));
+                    float heightWash=smoothstep(2.0,36.0,vHeight);
+                    float distanceWash=smoothstep(32.0,155.0,vDepth);
+                    float side=smoothstep(-38.0,38.0,vWorld.x);
+                    float strataWash=clamp(vHeight*.025+pigment*.33,0.0,1.0);
+                    // Independent cool and warm regions prevent a single muddy olive ramp.
+                    color=mix(ink,mineral,smoothstep(.08,.52,strataWash));
+                    float greenField=smoothstep(.28,.73,pigment*.55+heightWash*.30+side*.25);
+                    color=mix(color,moss,greenField*.70);
+                    float limeField=smoothstep(.35,.82,heightWash*.48+side*.40+pigment*.24);
+                    color=mix(color,leaf,limeField*.78);
+                    float goldField=smoothstep(.45,.90,heightWash*.48+distanceWash*.36+(1.0-pigment)*.25);
+                    color=mix(color,ochre,goldField*.78);
+                    color=mix(color,silk,smoothstep(.63,.98,distanceWash*.72+heightWash*.33)*.78);
+                    float sunwash=smoothstep(.10,.95,diffuse);
                     float drifting=waterNoise(vWorld.xz*.045+vec2(uTime*.018,-uTime*.011));
-                    float lightVeil=smoothstep(.22,.78,drifting)*sunwash;
-                    vec3 litPigment=mix(vec3(.77,.65,.38),leaf,smoothstep(.15,.82,lightDir.y));
-                    litPigment=mix(litPigment,silk,heightWash*.34);
-                    color=mix(color,litPigment,sunwash*(.24+.30*heightWash)+lightVeil*(.12+uHandGlow*.14));
-                    color*=.50+.50*diffuse;
-                    color=mix(color,vec3(.06,.34,.38),smoothstep(.58,.82,pigment)*(1.0-sunwash)*.48);
-                    color=mix(color,vec3(.65,.20,.105),cinnabar*.38*smoothstep(.55,.85,waterNoise(vWorld.xz*1.4)));
+                    float lightVeil=smoothstep(.30,.80,drifting)*sunwash;
+                    vec3 litPigment=mix(vec3(.87,.68,.30),leaf,smoothstep(.15,.82,lightDir.y));
+                    // Light modulates the pigments instead of painting every slope yellow.
+                    color*=.60+.46*diffuse;
+                    color=mix(color,litPigment,lightVeil*(.10+uHandGlow*.15));
+                    float shade=1.0-smoothstep(.03,.46,diffuse);
+                    color=mix(color,ink,shade*(1.0-heightWash)*.45);
                     vec2 warp=vec2(waterNoise(vWorld.xz*.12),waterNoise(vWorld.zx*.11+7.0));
                     float fibre=waterNoise(vec2(vWorld.x*2.8+warp.x*5.0,vWorld.z*.22+vHeight*.12+warp.y));
                     float grain=waterNoise(vWorld.xz*2.0);
@@ -397,7 +398,7 @@
                     color+=mix(mineral,leaf,sunwash)*smoothstep(.62,.84,fibre)*.07;
                     color+=silk*pow(diffuse,5.0)*(.035+uHandGlow*.06);
                     #ifdef FIBER_PASS
-                        color=mix(vec3(.14,.39,.36),vec3(.75,.74,.48),diffuse);
+                        color=mix(color,mineral,.22)+silk*diffuse*.14;
                         alpha=(.14+.25*diffuse)*smoothstep(.18,.55,waterNoise(vWorld.xz*.4));
                     #endif
                     #if !defined(SURFACE_PASS) && !defined(FIBER_PASS)
@@ -406,7 +407,7 @@
                 }
                 float haze = 1.0-exp(-max(0.0,vDepth-30.0)*.008);
                 #ifdef SURFACE_PASS
-                    color = mix(color,horizonColor(),haze*.32);
+                    color = mix(color,horizonColor(),haze*.15);
                 #else
                     color *= vIntensity;
                     alpha *= (1.0-haze)*.65;
@@ -556,8 +557,9 @@
                 vertexShader:`varying vec3 p;varying vec3 n;void main(){p=position;n=normal;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
                 fragmentShader:atmosphereGLSL+`uniform float uLayer;varying vec3 p;varying vec3 n;void main(){
                     float light=max(0.0,dot(normalize(n),normalize(lightPosition()-p)));
-                    vec3 c=mix(vec3(.085,.24,.25),vec3(.49,.56,.35),light);
-                    c=mix(c,vec3(.68,.61,.42),smoothstep(25.0,55.0,p.y)*light*.45);
+                    vec3 c=mix(vec3(.065,.25,.26),vec3(.51,.59,.30),light);
+                    c=mix(c,vec3(.73,.59,.34),smoothstep(18.0,48.0,p.y)*.65);
+                    c=mix(c,vec3(.88,.85,.70),smoothstep(40.0,70.0,p.y)*.68);
                     float mist=.24+uLayer*.13+(1.0-smoothstep(0.0,20.0,p.y))*.22;
                     c=mix(c,horizonColor(),clamp(mist,0.0,.86));
                     gl_FragColor=vec4(c,1.0);}`});
